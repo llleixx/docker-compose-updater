@@ -1,9 +1,17 @@
 A simple shell script to selectively and conveniently update containers in Docker Compose files.
 
+## Quick Start
+
+Run directly from GitHub without downloading:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/llleixx/docker-compose-updater/main/compose-updater.sh)
+```
+
 ## Usage
 
 ```bash
-./compose-update.sh /opt/docker
+./compose-updater.sh /opt/docker
 ```
 
 If no directory is provided, the script defaults to `/opt/docker`.
