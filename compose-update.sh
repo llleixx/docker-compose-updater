@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-#
-# Usage:
-#   bash <(curl -fsSL https://raw.githubusercontent.com/llleixx/docker-compose-updater/main/compose-updater.sh)
-#
 set -euo pipefail
 
 DEFAULT_ROOT="/opt/docker"
