@@ -16,3 +16,12 @@ The script will:
 2. List projects and their services.
 3. Prompt for selecting one, many, or all projects.
 4. Pull new images and recreate containers for the selected projects.
+
+### Selection syntax
+
+When prompted, you can choose projects using:
+
+- Single numbers (e.g. `1,3`)
+- Ranges with `-` (e.g. `2-5`)
+- Mixes of numbers and ranges (e.g. `1,3-4,7`)
+- `a` or `A` for all projects
