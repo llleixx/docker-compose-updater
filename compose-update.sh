@@ -4,18 +4,50 @@ set -euo pipefail
 DEFAULT_ROOT="/opt/docker"
 ROOT_DIR="${1:-$DEFAULT_ROOT}"
 
+if [[ -t 1 ]]; then
+  COLOR_RED=$'\033[0;31m'
+  COLOR_GREEN=$'\033[0;32m'
+  COLOR_YELLOW=$'\033[0;33m'
+  COLOR_BLUE=$'\033[0;34m'
+  COLOR_BOLD=$'\033[1m'
+  COLOR_RESET=$'\033[0m'
+else
+  COLOR_RED=""
+  COLOR_GREEN=""
+  COLOR_YELLOW=""
+  COLOR_BLUE=""
+  COLOR_BOLD=""
+  COLOR_RESET=""
+fi
+
+info() {
+  echo "${COLOR_BLUE}ℹ${COLOR_RESET} $*"
+}
+
+success() {
+  echo "${COLOR_GREEN}✔${COLOR_RESET} $*"
+}
+
+warn() {
+  echo "${COLOR_YELLOW}⚠${COLOR_RESET} $*"
+}
+
+error() {
+  echo "${COLOR_RED}✖${COLOR_RESET} $*" >&2
+}
+
 if [[ ! -d "$ROOT_DIR" ]]; then
-  echo "Error: directory not found: $ROOT_DIR" >&2
+  error "Directory not found: $ROOT_DIR"
   exit 1
 fi
 
 if ! command -v docker >/dev/null 2>&1; then
-  echo "Error: docker is not installed or not in PATH." >&2
+  error "Docker is not installed or not in PATH."
   exit 1
 fi
 
 if ! docker compose version >/dev/null 2>&1; then
-  echo "Error: docker compose is not available (docker compose version failed)." >&2
+  error "Docker compose is not available (docker compose version failed)."
   exit 1
 fi
 
@@ -63,10 +95,11 @@ print_projects() {
   local -n updates_ref=$2
   local i dir
 
-  echo "Projects:"
+  echo "${COLOR_BOLD}Projects:${COLOR_RESET}"
   for i in "${!dirs_ref[@]}"; do
     dir="${dirs_ref[$i]}"
-    printf "  [%d] %s\n      services: %s\n" "$((i + 1))" "$dir" "${updates_ref[$i]}"
+    printf "  ${COLOR_GREEN}[%d]${COLOR_RESET} %s\n      ${COLOR_YELLOW}services:${COLOR_RESET} %s\n" \
+      "$((i + 1))" "$dir" "${updates_ref[$i]}"
   done
 }
 
@@ -75,7 +108,7 @@ select_projects() {
   local -n selection_ref=$2
   local input
 
-  read -r -p "Select projects to update (comma-separated, or 'a' for all): " input
+  read -r -p "Select projects to update (comma-separated, ranges with '-', or 'a' for all): " input
 
   if [[ "$input" =~ ^[aA]$ ]]; then
     selection_ref=("${!dirs_ref[@]}")
@@ -93,7 +126,7 @@ select_projects() {
       start="${token%-*}"
       end="${token#*-}"
       if (( start > end )); then
-        echo "Invalid range: $token" >&2
+        error "Invalid range: $token"
         exit 1
       fi
       for ((i=start; i<=end; i++)); do
@@ -102,7 +135,7 @@ select_projects() {
     elif [[ "$token" =~ ^[0-9]+$ ]]; then
       selection_ref+=("$token")
     else
-      echo "Invalid selection: $token" >&2
+      error "Invalid selection: $token"
       exit 1
     fi
   done
@@ -110,7 +143,7 @@ select_projects() {
   for i in "${!selection_ref[@]}"; do
     selection_ref[$i]=$((selection_ref[$i] - 1))
     if (( selection_ref[$i] < 0 || selection_ref[$i] >= ${#dirs_ref[@]} )); then
-      echo "Selection out of range: $((selection_ref[$i] + 1))" >&2
+      error "Selection out of range: $((selection_ref[$i] + 1))"
       exit 1
     fi
   done
@@ -121,15 +154,17 @@ update_project() {
   dir="$1"
   file="$2"
 
-  echo "Updating $dir"
+  info "Updating ${COLOR_BOLD}$dir${COLOR_RESET}"
   docker compose -f "$file" pull
   docker compose -f "$file" up -d
+  success "Updated $dir"
 }
 
+info "Scanning for docker compose projects under ${COLOR_BOLD}$ROOT_DIR${COLOR_RESET}..."
 find_compose_projects
 
 if [[ ${#DIR_TO_FILE[@]} -eq 0 ]]; then
-  echo "No docker compose projects found in $ROOT_DIR"
+  warn "No docker compose projects found in $ROOT_DIR"
   exit 0
 fi
 
@@ -156,4 +191,4 @@ for idx in "${SELECTED[@]}"; do
   echo
 done
 
-echo "Update complete."
+success "Update complete."
