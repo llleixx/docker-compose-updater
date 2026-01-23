@@ -2,7 +2,9 @@
 set -euo pipefail
 
 DEFAULT_ROOT="/opt/docker"
-ROOT_DIR="${1:-$DEFAULT_ROOT}"
+ROOT_DIR="$DEFAULT_ROOT"
+ROOT_DIR_SET=false
+ALL=false
 
 if [[ -t 1 ]]; then
   COLOR_RED=$'\033[0;31m'
@@ -35,6 +37,59 @@ warn() {
 error() {
   echo "${COLOR_RED}✖${COLOR_RESET} $*" >&2
 }
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [options] [root_dir]
+
+Options:
+  -a, --all         Update all projects without prompting.
+  -d, --dir DIR     Root directory to scan (default: $DEFAULT_ROOT).
+  -h, --help        Show this help message.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -a|--all)
+      ALL=true
+      shift
+      ;;
+    -d|--dir)
+      if [[ $# -lt 2 ]]; then
+        error "Missing argument for $1"
+        usage
+        exit 1
+      fi
+      ROOT_DIR="$2"
+      ROOT_DIR_SET=true
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      error "Unknown option: $1"
+      usage
+      exit 1
+      ;;
+    *)
+      if [[ "$ROOT_DIR_SET" == true ]]; then
+        error "Unexpected argument: $1"
+        usage
+        exit 1
+      fi
+      ROOT_DIR="$1"
+      ROOT_DIR_SET=true
+      shift
+      ;;
+  esac
+done
 
 if [[ ! -d "$ROOT_DIR" ]]; then
   error "Directory not found: $ROOT_DIR"
@@ -108,7 +163,7 @@ select_projects() {
   local -n selection_ref=$2
   local input
 
-  read -r -p "Select projects to update (comma-separated, ranges with '-', or 'a' for all): " input
+  read -r -p "Select projects to update (comma-separated, ranges with '-', or 'a' for all; use -a to skip prompt): " input
 
   if [[ "$input" =~ ^[aA]$ ]]; then
     selection_ref=("${!dirs_ref[@]}")
@@ -184,7 +239,11 @@ done < <(printf '%s\n' "${!DIR_TO_FILE[@]}" | sort)
 print_projects PROJECT_DIRS PROJECT_UPDATES
 
 SELECTED=()
-select_projects PROJECT_DIRS SELECTED
+if [[ "$ALL" == true ]]; then
+  SELECTED=("${!PROJECT_DIRS[@]}")
+else
+  select_projects PROJECT_DIRS SELECTED
+fi
 
 for idx in "${SELECTED[@]}"; do
   update_project "${PROJECT_DIRS[$idx]}" "${PROJECT_FILES[$idx]}"

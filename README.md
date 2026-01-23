@@ -16,6 +16,27 @@ bash <(curl -fsSL https://raw.githubusercontent.com/llleixx/docker-compose-updat
 
 If no directory is provided, the script defaults to `/opt/docker`.
 
+### Options
+
+```
+-a, --all         Update all projects without prompting.
+-d, --dir DIR     Root directory to scan (default: /opt/docker).
+-h, --help        Show help text.
+```
+
+You can also pass the root directory as a positional argument (for example,
+`./compose-updater.sh /opt/docker`).
+
+Examples:
+
+```bash
+# Non-interactive update of every project under /opt/docker
+./compose-updater.sh --all
+
+# Scan a different root directory
+./compose-updater.sh --dir /srv/compose
+```
+
 Requirements: `docker`, `docker compose`.
 
 The script will:
