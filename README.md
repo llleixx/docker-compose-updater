@@ -14,13 +14,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/llleixx/docker-compose-updat
 ./compose-updater.sh /opt/docker
 ```
 
-If no directory is provided, the script defaults to `/opt/docker`.
+If no directory is provided, the script will discover running Compose projects from Docker metadata, regardless of where their compose files are stored.
 
 ### Options
 
 ```
 -a, --all         Update all projects without prompting.
--d, --dir DIR     Root directory to scan (default: /opt/docker).
+-d, --dir DIR     Root directory to scan (if omitted, auto-discover running projects).
 -h, --help        Show help text.
 ```
 
@@ -30,10 +30,10 @@ You can also pass the root directory as a positional argument (for example,
 Examples:
 
 ```bash
-# Non-interactive update of every project under /opt/docker
+# Non-interactive update of all running compose projects discovered from Docker
 ./compose-updater.sh --all
 
-# Scan a different root directory
+# Restrict scanning to a specific root directory
 ./compose-updater.sh --dir /srv/compose
 ```
 
@@ -41,10 +41,12 @@ Requirements: `docker`, `docker compose`.
 
 The script will:
 
-1. Recursively scan the directory for Docker Compose files.
-2. List projects and their services.
-3. Prompt for selecting one, many, or all projects.
-4. Pull new images and recreate containers for the selected projects.
+1. If `--dir` is provided, recursively scan that directory for Docker Compose files.
+2. If `--dir` is omitted, discover running compose projects from Docker container labels (`com.docker.compose.project.*`).
+3. Keep only projects that currently have running containers (`docker compose ps --status running`).
+4. List active projects and their services.
+5. Prompt for selecting one, many, or all active projects.
+6. Pull new images and recreate containers for the selected projects.
 
 ### Selection syntax
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 DEFAULT_ROOT="/opt/docker"
-ROOT_DIR="$DEFAULT_ROOT"
+ROOT_DIR=""
 ROOT_DIR_SET=false
 ALL=false
 
@@ -39,14 +39,15 @@ error() {
 }
 
 usage() {
-  cat <<EOF
+  cat <<EOF_USAGE
 Usage: $(basename "$0") [options] [root_dir]
 
 Options:
   -a, --all         Update all projects without prompting.
-  -d, --dir DIR     Root directory to scan (default: $DEFAULT_ROOT).
+  -d, --dir DIR     Root directory to scan.
+                    If omitted, discover running compose projects via Docker labels.
   -h, --help        Show this help message.
-EOF
+EOF_USAGE
 }
 
 while [[ $# -gt 0 ]]; do
@@ -91,11 +92,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ ! -d "$ROOT_DIR" ]]; then
-  error "Directory not found: $ROOT_DIR"
-  exit 1
-fi
-
 if ! command -v docker >/dev/null 2>&1; then
   error "Docker is not installed or not in PATH."
   exit 1
@@ -103,6 +99,11 @@ fi
 
 if ! docker compose version >/dev/null 2>&1; then
   error "Docker compose is not available (docker compose version failed)."
+  exit 1
+fi
+
+if [[ "$ROOT_DIR_SET" == true && ! -d "$ROOT_DIR" ]]; then
+  error "Directory not found: $ROOT_DIR"
   exit 1
 fi
 
@@ -118,18 +119,49 @@ compose_priority() {
   esac
 }
 
+pick_compose_file_in_dir() {
+  local dir candidate best_file="" best_prio=999
+
+  for candidate in \
+    "$dir/compose.yml" \
+    "$dir/compose.yaml" \
+    "$dir/docker-compose.yml" \
+    "$dir/docker-compose.yaml"; do
+    if [[ -f "$candidate" ]]; then
+      local prio
+      prio="$(compose_priority "$candidate")"
+      if (( prio < best_prio )); then
+        best_prio="$prio"
+        best_file="$candidate"
+      fi
+    fi
+  done
+
+  if [[ -n "$best_file" ]]; then
+    echo "$best_file"
+  fi
+}
+
+set_project_file() {
+  local dir file prio
+  dir="$1"
+  file="$2"
+  prio="$(compose_priority "$file")"
+
+  if [[ -z "${DIR_TO_PRIO[$dir]+set}" || "$prio" -lt "${DIR_TO_PRIO[$dir]}" ]]; then
+    DIR_TO_PRIO[$dir]="$prio"
+    DIR_TO_FILE[$dir]="$file"
+  fi
+}
+
 find_compose_projects() {
-  local file dir prio
+  local file dir
   declare -gA DIR_TO_FILE
   declare -gA DIR_TO_PRIO
 
   while IFS= read -r -d '' file; do
     dir="$(dirname "$file")"
-    prio="$(compose_priority "$file")"
-    if [[ -z "${DIR_TO_PRIO[$dir]+set}" || "$prio" -lt "${DIR_TO_PRIO[$dir]}" ]]; then
-      DIR_TO_PRIO[$dir]="$prio"
-      DIR_TO_FILE[$dir]="$file"
-    fi
+    set_project_file "$dir" "$file"
   done < <(
     find "$ROOT_DIR" -type f \( \
       -name 'compose.yml' -o -name 'compose.yaml' -o \
@@ -138,11 +170,61 @@ find_compose_projects() {
   )
 }
 
+find_running_compose_projects() {
+  local row working_dir config_files selected_file raw_file resolved_file
+  declare -gA DIR_TO_FILE
+  declare -gA DIR_TO_PRIO
+
+  while IFS= read -r row; do
+    [[ -z "$row" ]] && continue
+
+    working_dir="${row%%|*}"
+    config_files="${row#*|}"
+
+    [[ -z "$working_dir" ]] && continue
+
+    selected_file=""
+    IFS=',' read -r -a config_file_arr <<< "$config_files"
+    for raw_file in "${config_file_arr[@]}"; do
+      [[ -z "$raw_file" ]] && continue
+      if [[ "$raw_file" = /* ]]; then
+        resolved_file="$raw_file"
+      else
+        resolved_file="$working_dir/$raw_file"
+      fi
+
+      if [[ -f "$resolved_file" ]]; then
+        if [[ -z "$selected_file" ]]; then
+          selected_file="$resolved_file"
+        elif [[ "$(compose_priority "$resolved_file")" -lt "$(compose_priority "$selected_file")" ]]; then
+          selected_file="$resolved_file"
+        fi
+      fi
+    done
+
+    if [[ -z "$selected_file" ]]; then
+      selected_file="$(pick_compose_file_in_dir "$working_dir")"
+    fi
+
+    if [[ -n "$selected_file" ]]; then
+      set_project_file "$working_dir" "$selected_file"
+    fi
+  done < <(docker ps --filter status=running --filter label=com.docker.compose.project --format '{{.Label "com.docker.compose.project.working_dir"}}|{{.Label "com.docker.compose.project.config_files"}}' | sort -u)
+}
+
 list_services() {
   local file
   file="$1"
 
   docker compose -f "$file" config --services | xargs
+}
+
+is_project_running() {
+  local file running_services
+  file="$1"
+
+  running_services="$(docker compose -f "$file" ps --status running --services | xargs || true)"
+  [[ -n "$running_services" ]]
 }
 
 print_projects() {
@@ -161,7 +243,7 @@ print_projects() {
 select_projects() {
   local -n dirs_ref=$1
   local -n selection_ref=$2
-  local input
+  local input start end i token
 
   read -r -p "Select projects to update (comma-separated, ranges with '-', or 'a' for all; use -a to skip prompt): " input
 
@@ -215,11 +297,20 @@ update_project() {
   success "Updated $dir"
 }
 
-info "Scanning for docker compose projects under ${COLOR_BOLD}$ROOT_DIR${COLOR_RESET}..."
-find_compose_projects
+if [[ "$ROOT_DIR_SET" == true ]]; then
+  info "Scanning for docker compose projects under ${COLOR_BOLD}$ROOT_DIR${COLOR_RESET}..."
+  find_compose_projects
+else
+  info "No scan directory provided, discovering running compose projects via Docker labels..."
+  find_running_compose_projects
+fi
 
 if [[ ${#DIR_TO_FILE[@]} -eq 0 ]]; then
-  warn "No docker compose projects found in $ROOT_DIR"
+  if [[ "$ROOT_DIR_SET" == true ]]; then
+    warn "No docker compose projects found in $ROOT_DIR"
+  else
+    warn "No running docker compose projects found via Docker labels"
+  fi
   exit 0
 fi
 
@@ -229,12 +320,24 @@ PROJECT_UPDATES=()
 
 while IFS= read -r dir; do
   file="${DIR_TO_FILE[$dir]}"
+
+  if ! is_project_running "$file"; then
+    info "Skipping inactive project: ${COLOR_BOLD}$dir${COLOR_RESET}"
+    unset file
+    continue
+  fi
+
   services="$(list_services "$file")"
   PROJECT_DIRS+=("$dir")
   PROJECT_FILES+=("$file")
   PROJECT_UPDATES+=("$services")
   unset file services
 done < <(printf '%s\n' "${!DIR_TO_FILE[@]}" | sort)
+
+if [[ ${#PROJECT_DIRS[@]} -eq 0 ]]; then
+  warn "No running docker compose projects found"
+  exit 0
+fi
 
 print_projects PROJECT_DIRS PROJECT_UPDATES
 
