@@ -25,21 +25,24 @@ case "$1 $2" in
     configs="$TEST_ROOT/project/compose.yml"
     [[ $CASE != multifile ]] || configs+=",$TEST_ROOT/project/override.yml"
     jq -cn --arg dir "$TEST_ROOT/project" --arg ref "$ref" --arg configs "$configs" \
-      '[{Name:"/app",Image:"sha256:old",Config:{Image:$ref,Labels:{"com.docker.compose.project":"custom-name","com.docker.compose.service":"web","com.docker.compose.project.working_dir":$dir,"com.docker.compose.project.config_files":$configs}}}]' ;;
+      --arg test "$CASE" '[{Name:"/app",Image:"sha256:old",Config:{Image:$ref,Labels:{"com.docker.compose.project":"custom-name","com.docker.compose.service":"web","com.docker.compose.project.working_dir":$dir,"com.docker.compose.project.config_files":$configs}}} | if ($test | startswith("containerd")) then .Image="sha256:index" | .ImageManifestDescriptor={digest:"sha256:current-manifest"} else . end]' ;;
   'image inspect')
     digests='["example/app@sha256:manifest"]'
     [[ $CASE != local ]] || digests='[]'
     jq -cn --argjson digests "$digests" '[{Os:"linux",Architecture:"amd64",RepoDigests:$digests}]' ;;
   'manifest inspect')
+    [[ $CASE != stubborn ]] || { trap '' TERM; sleep 30; exit 1; }
     [[ $CASE != timeout ]] || { sleep 3; exit 1; }
     [[ $CASE != auth ]] || { echo unauthorized >&2; exit 1; }
     digest=sha256:new
     [[ $CASE != latest ]] || digest=sha256:old
     arch=amd64
+    manifest=sha256:remote-manifest
+    [[ $CASE != containerd-latest ]] || manifest=sha256:current-manifest
     [[ $CASE != platform ]] || arch=arm64
     # Other platform and attestation must not affect comparison.
-    jq -cn --arg digest "$digest" --arg arch "$arch" \
-      '[{Descriptor:{platform:{os:"linux",architecture:$arch}},OCIManifest:{config:{digest:$digest}}},{Descriptor:{platform:{os:"linux",architecture:"arm"}},OCIManifest:{config:{digest:"sha256:other"}}},{Descriptor:{platform:{os:"unknown",architecture:"unknown"}},OCIManifest:{config:{digest:"sha256:attestation"}}}]' ;;
+    jq -cn --arg digest "$digest" --arg arch "$arch" --arg manifest "$manifest" \
+      '[{Descriptor:{digest:$manifest,platform:{os:"linux",architecture:$arch}},OCIManifest:{config:{digest:$digest}}},{Descriptor:{platform:{os:"linux",architecture:"arm"}},OCIManifest:{config:{digest:"sha256:other"}}},{Descriptor:{platform:{os:"unknown",architecture:"unknown"}},OCIManifest:{config:{digest:"sha256:attestation"}}}]' ;;
   compose*)
     case "${*: -1}" in
       running) echo web ;;
@@ -57,16 +60,16 @@ run_json() {
   jq -e . "$tmp/result" >/dev/null
   ! grep -Eq '(^| )(pull|up)( |$)' "$tmp/calls"
 }
-for CASE in update latest pinned local platform auth timeout multifile empty; do
+for CASE in update latest containerd-latest containerd-update pinned local platform auth timeout stubborn multifile empty; do
   export CASE
   expected=0
-  case "$CASE" in platform|auth|timeout) expected=2 ;; esac
+  case "$CASE" in platform|auth|timeout|stubborn) expected=2 ;; esac
   run_json "$expected"
   case "$CASE" in
-    update) jq -e '.projects[0].status == "update" and .projects[0].project == "custom-name"' "$tmp/result" ;;
-    latest) jq -e '.projects[0].status == "latest"' "$tmp/result" ;;
+    update|containerd-update) jq -e '.projects[0].status == "update" and .projects[0].project == "custom-name"' "$tmp/result" ;;
+    latest|containerd-latest) jq -e '.projects[0].status == "latest"' "$tmp/result" ;;
     pinned|local) jq -e '.containers[0].status == "skipped"' "$tmp/result" ;;
-    platform|auth|timeout) jq -e '.containers[0].status == "unknown"' "$tmp/result" ;;
+    platform|auth|timeout|stubborn) jq -e '.containers[0].status == "unknown"' "$tmp/result" ;;
     multifile) jq -e '.projects[0].selectable == false' "$tmp/result" ;;
     empty) jq -e '.containers == [] and .projects == []' "$tmp/result" ;;
   esac > /dev/null
