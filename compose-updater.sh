@@ -5,6 +5,9 @@ DEFAULT_ROOT="/opt/docker"
 ROOT_DIR=""
 ROOT_DIR_SET=false
 ALL=false
+CHECK=false
+JSON=false
+CHECK_TIMEOUT=45
 
 if [[ -t 1 ]]; then
   COLOR_RED=$'\033[0;31m'
@@ -44,6 +47,9 @@ Usage: $(basename "$0") [options] [root_dir]
 
 Options:
   -a, --all         Update all projects without prompting.
+  --check          Check tags, then select projects to update (blank = none).
+  --json           With --check, output JSON only; never update.
+  --timeout SEC    Registry query timeout in check mode (default: 45).
   -d, --dir DIR     Root directory to scan.
                     If omitted, discover running compose projects via Docker labels.
   -h, --help        Show this help message.
@@ -52,6 +58,9 @@ EOF_USAGE
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --check) CHECK=true; shift ;;
+    --json) JSON=true; shift ;;
+    --timeout) CHECK_TIMEOUT=${2:?Missing timeout}; shift 2 ;;
     -a|--all)
       ALL=true
       shift
@@ -91,6 +100,20 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$JSON" == true && "$CHECK" != true ]]; then
+  error "--json requires --check"; exit 1
+fi
+if [[ "$CHECK" == true && "$ALL" == true ]]; then
+  error "--check cannot be combined with --all; select projects interactively."; exit 1
+fi
+if [[ ! "$CHECK_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+  error "Invalid timeout"; exit 1
+fi
+if [[ "$JSON" == true ]]; then
+  info() { echo "$*" >&2; }
+  warn() { echo "$*" >&2; }
+fi
 
 if ! command -v docker >/dev/null 2>&1; then
   error "Docker is not installed or not in PATH."
@@ -245,7 +268,7 @@ select_projects() {
   local -n selection_ref=$2
   local input start end i token
 
-  read -r -p "Select projects to update (comma-separated, ranges with '-', or 'a' for all; use -a to skip prompt): " input
+  read -r -p "Select projects to update (comma-separated, ranges with '-', 'a' for all, blank for none): " input || input=""
 
   if [[ "$input" =~ ^[aA]$ ]]; then
     selection_ref=("${!dirs_ref[@]}")
@@ -262,7 +285,11 @@ select_projects() {
     if [[ "$token" =~ ^[0-9]+-[0-9]+$ ]]; then
       start="${token%-*}"
       end="${token#*-}"
-      if (( start > end )); then
+      if (( ${#start} > 8 || ${#end} > 8 )); then
+        error "Selection out of range: $token"; exit 1
+      fi
+      start=$((10#$start)); end=$((10#$end))
+      if (( start < 1 || end > ${#dirs_ref[@]} || start > end )); then
         error "Invalid range: $token"
         exit 1
       fi
@@ -270,7 +297,10 @@ select_projects() {
         selection_ref+=("$i")
       done
     elif [[ "$token" =~ ^[0-9]+$ ]]; then
-      selection_ref+=("$token")
+      if (( ${#token} > 8 )); then
+        error "Selection out of range: $token"; exit 1
+      fi
+      selection_ref+=("$((10#$token))")
     else
       error "Invalid selection: $token"
       exit 1
@@ -292,12 +322,151 @@ update_project() {
   file="$2"
 
   info "Updating ${COLOR_BOLD}$dir${COLOR_RESET}"
-  docker compose -f "$file" pull
-  docker compose -f "$file" up -d
+  local -a compose_args=(-f "$file")
+  if [[ -n ${3:-} ]]; then compose_args=(-p "$3" "${compose_args[@]}"); fi
+  docker compose "${compose_args[@]}" pull
+  docker compose "${compose_args[@]}" up -d
   success "Updated $dir"
 }
 
+
+# Check running image config digests against registry metadata; never pull here.
+check_projects() (
+  tmp=$(mktemp -d)
+  trap 'rm -rf -- "$tmp"' EXIT
+  declare -A cached
+  counter=0
+  rows="$tmp/rows"
+  : > "$rows"
+  emit() {
+    jq -cn --arg project "$p" --arg service "$service" --arg container "$name" \
+      --arg image "$ref" --arg status "$1" --arg reason "$2" \
+      --arg directory "$working_dir" --arg file "$compose_file" --argjson selectable "$selectable" --arg current "$current" --arg remote "${3:-}" \
+      '{directory:$directory,file:$file,selectable:$selectable,project:$project,service:$service,container:$container,image:$image,status:$status,reason:$reason,current:$current,remote:$remote}' >> "$rows"
+  }
+  docker ps -q --filter label=com.docker.compose.project > "$tmp/ids"
+  while IFS= read -r id; do
+    [[ -n $id ]] || continue
+    docker inspect "$id" > "$tmp/container"
+    p=$(jq -r '.[0].Config.Labels["com.docker.compose.project"]' "$tmp/container")
+    working_dir=$(jq -r '.[0].Config.Labels["com.docker.compose.project.working_dir"] // ""' "$tmp/container")
+    [[ -n $working_dir && ${DIR_TO_FILE[$working_dir]+yes} ]] || continue
+    compose_file=${DIR_TO_FILE[$working_dir]}
+    config_files=$(jq -r '.[0].Config.Labels["com.docker.compose.project.config_files"] // ""' "$tmp/container")
+    selectable=true
+    # Multiple files need the original invocation, not a guessed single file.
+    [[ $config_files != *,* && -n $config_files ]] || selectable=false
+    if [[ $selectable == true ]]; then
+      recorded_file=$config_files
+      [[ $recorded_file == /* ]] || recorded_file="$working_dir/$recorded_file"
+      [[ $recorded_file == "$compose_file" ]] || selectable=false
+    fi
+    service=$(jq -r '.[0].Config.Labels["com.docker.compose.service"] // ""' "$tmp/container")
+    name=$(jq -r '.[0].Name | ltrimstr("/")' "$tmp/container")
+    ref=$(jq -r '.[0].Config.Image' "$tmp/container")
+    current=$(jq -r '.[0].Image' "$tmp/container")
+    if [[ $ref == *@sha256:* ]]; then
+      emit skipped 'Digest-pinned image; no floating tag to check'; continue
+    fi
+    if ! docker image inspect "$current" > "$tmp/image" 2> "$tmp/error"; then
+      emit unknown 'Cannot inspect running image'; continue
+    fi
+    if [[ $(jq '.[0].RepoDigests // [] | length' "$tmp/image") == 0 ]]; then
+      emit skipped 'No registry digest (possibly a local build)'; continue
+    fi
+    os=$(jq -r '.[0].Os' "$tmp/image")
+    arch=$(jq -r '.[0].Architecture' "$tmp/image")
+    variant=$(jq -r '.[0].Variant // ""' "$tmp/image")
+    if [[ ! ${cached[$ref]+yes} ]]; then
+      file="$tmp/manifest-$counter"
+      counter=$((counter + 1))
+      # Docker CLI negotiates registry auth and fetches metadata only, not layers.
+      if timeout "${CHECK_TIMEOUT}s" docker manifest inspect --verbose "$ref" > "$file" 2> "$file.err"; then
+        cached[$ref]=$file
+      else
+        rc=$?
+        cached[$ref]="$file.failed"
+        if [[ $rc == 124 ]]; then
+          printf 'Timed out after %ss\n' "$CHECK_TIMEOUT" > "$file.err"
+        elif [[ ! -s $file.err ]]; then
+          printf 'docker manifest inspect exited with code %s\n' "$rc" > "$file.err"
+        fi
+        mv "$file.err" "$file.failed"
+      fi
+    fi
+    file=${cached[$ref]}
+    if [[ $file == *.failed ]]; then
+      emit unknown "Registry query failed: $(head -c 400 "$file")"; continue
+    fi
+    # Container Image is the image config digest, not the manifest/index digest.
+    # Select the running platform first; ignore attestations and other platforms.
+    if ! remote=$(jq -er --arg os "$os" --arg arch "$arch" --arg variant "$variant" '
+      (if type == "array" then .[] else . end)
+      | select(.Descriptor.platform.os == $os and .Descriptor.platform.architecture == $arch)
+      | select($variant == "" or (.Descriptor.platform.variant // "") == $variant)
+      | (.OCIManifest // .SchemaV2Manifest // (try (.Raw | @base64d | fromjson) catch null))
+      | .config.digest // empty' "$file" | sort -u); then
+      emit unknown 'No matching platform/config digest in registry response'; continue
+    fi
+    if [[ $remote == *$'\n'* ]]; then
+      emit unknown 'Multiple matching platform digests; cannot compare safely'; continue
+    fi
+    if [[ $current == "$remote" ]]; then
+      emit latest 'Running image matches remote tag' "$remote"
+    else
+      emit update 'Remote tag points to a different image' "$remote"
+    fi
+  done < "$tmp/ids"
+
+  jq -s '{containers:., projects:(group_by([.project,.directory]) | map({project:.[0].project,
+    directory:.[0].directory,file:.[0].file,selectable:all(.[]; .selectable),
+    status:(if any(.[]; .status == "update") then "update" elif any(.[]; .status == "unknown") then "unknown" elif all(.[]; .status == "skipped") then "skipped" else "latest" end),
+    updates:([.[] | select(.status == "update") | .service] | unique),
+    unknown:([.[] | select(.status == "unknown") | .service] | unique),
+    skipped:([.[] | select(.status == "skipped") | .service] | unique)}))}' "$rows" > "$tmp/result"
+  check_rc=0
+  if jq -e 'any(.containers[]; .status == "unknown")' "$tmp/result" >/dev/null; then check_rc=2; fi
+  if [[ "$JSON" == true ]]; then
+    cat "$tmp/result"
+    exit "$check_rc"
+  fi
+  printf 'PROJECT\tSERVICE\tSTATUS\tIMAGE\n'
+  jq -r '.containers[] | [.project,.service,.status,.image] | @tsv' "$tmp/result"
+  jq -r '.containers[] | select(.status == "unknown" or .status == "skipped") | "\(.container): \(.reason)"' "$tmp/result" >&2
+  jq -r '.projects[] | select(.selectable | not) | "Manual update required (multiple/custom Compose files): \(.project)"' "$tmp/result" >&2
+  CHECK_DIRS=()
+  CHECK_FILES=()
+  CHECK_NAMES=()
+  CHECK_SERVICES=()
+  while IFS= read -r item; do
+    CHECK_DIRS+=("$(jq -r '.directory' <<< "$item")")
+    CHECK_FILES+=("$(jq -r '.file' <<< "$item")")
+    CHECK_NAMES+=("$(jq -r '.project' <<< "$item")")
+    CHECK_SERVICES+=("$(jq -r '.updates | join(" ")' <<< "$item")")
+  done < <(jq -c '.projects[] | select(.status == "update" and .selectable)' "$tmp/result")
+  if [[ ${#CHECK_DIRS[@]} -eq 0 ]]; then
+    info "No projects with detected updates available for selection."
+    exit "$check_rc"
+  fi
+  print_projects CHECK_DIRS CHECK_SERVICES
+  if [[ ! -t 0 ]]; then
+    info "Non-interactive input: report only; no projects updated."
+    exit "$check_rc"
+  fi
+  SELECTED=()
+  select_projects CHECK_DIRS SELECTED
+  # De-duplicate selections so overlapping ranges cannot repeat an update.
+  declare -A done_projects
+  for idx in "${SELECTED[@]}"; do
+    [[ ! ${done_projects[$idx]+yes} ]] || continue
+    done_projects[$idx]=1
+    update_project "${CHECK_DIRS[$idx]}" "${CHECK_FILES[$idx]}" "${CHECK_NAMES[$idx]}"
+  done
+  exit "$check_rc"
+)
+
 if [[ "$ROOT_DIR_SET" == true ]]; then
+  ROOT_DIR="$(cd "$ROOT_DIR" && pwd -P)"
   info "Scanning for docker compose projects under ${COLOR_BOLD}$ROOT_DIR${COLOR_RESET}..."
   find_compose_projects
 else
@@ -305,7 +474,15 @@ else
   find_running_compose_projects
 fi
 
-if [[ ${#DIR_TO_FILE[@]} -eq 0 ]]; then
+if [[ "$CHECK" == true ]]; then
+  for tool in jq timeout; do
+    command -v "$tool" >/dev/null || { error "Missing check dependency: $tool"; exit 1; }
+  done
+  check_projects
+  exit $?
+fi
+
+if [[ -z ${DIR_TO_FILE[*]+set} ]]; then
   if [[ "$ROOT_DIR_SET" == true ]]; then
     warn "No docker compose projects found in $ROOT_DIR"
   else
