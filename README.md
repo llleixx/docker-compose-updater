@@ -60,6 +60,8 @@ Check mode additionally requires `jq` and GNU `timeout` (on Debian/Ubuntu:
 `docker manifest inspect --verbose`, using Docker's configured registry credentials.
 It compares the running container's image config digest with the remote image for
 the same OS/architecture/variant, without downloading image layers.
+Each query has a 15-second default timeout; a CLI process that ignores termination
+is forcibly killed after a further 2 seconds. `--timeout` overrides the query limit.
 
 Each container is reported as `update`, `latest`, `unknown`, or `skipped`.
 Only projects with detected updates are offered for selection. Press Enter to

@@ -31,6 +31,7 @@ case "$1 $2" in
     [[ $CASE != local ]] || digests='[]'
     jq -cn --argjson digests "$digests" '[{Os:"linux",Architecture:"amd64",RepoDigests:$digests}]' ;;
   'manifest inspect')
+    [[ $CASE != stubborn ]] || { trap '' TERM; sleep 30; exit 1; }
     [[ $CASE != timeout ]] || { sleep 3; exit 1; }
     [[ $CASE != auth ]] || { echo unauthorized >&2; exit 1; }
     digest=sha256:new
@@ -57,16 +58,16 @@ run_json() {
   jq -e . "$tmp/result" >/dev/null
   ! grep -Eq '(^| )(pull|up)( |$)' "$tmp/calls"
 }
-for CASE in update latest pinned local platform auth timeout multifile empty; do
+for CASE in update latest pinned local platform auth timeout stubborn multifile empty; do
   export CASE
   expected=0
-  case "$CASE" in platform|auth|timeout) expected=2 ;; esac
+  case "$CASE" in platform|auth|timeout|stubborn) expected=2 ;; esac
   run_json "$expected"
   case "$CASE" in
     update) jq -e '.projects[0].status == "update" and .projects[0].project == "custom-name"' "$tmp/result" ;;
     latest) jq -e '.projects[0].status == "latest"' "$tmp/result" ;;
     pinned|local) jq -e '.containers[0].status == "skipped"' "$tmp/result" ;;
-    platform|auth|timeout) jq -e '.containers[0].status == "unknown"' "$tmp/result" ;;
+    platform|auth|timeout|stubborn) jq -e '.containers[0].status == "unknown"' "$tmp/result" ;;
     multifile) jq -e '.projects[0].selectable == false' "$tmp/result" ;;
     empty) jq -e '.containers == [] and .projects == []' "$tmp/result" ;;
   esac > /dev/null
