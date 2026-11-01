@@ -22,7 +22,7 @@ If no directory is provided, the script will discover running Compose projects f
 -a, --all         Update all projects without prompting.
 --check          Check image tags, then select projects with updates.
 --json           With --check, output JSON only; never update.
---timeout SEC    Registry query timeout in seconds (default: 45).
+--timeout SEC    Registry query timeout in seconds (default: 15).
 -d, --dir DIR     Root directory to scan (if omitted, auto-discover running projects).
 -h, --help        Show help text.
 ```

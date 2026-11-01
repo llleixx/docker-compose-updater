@@ -7,7 +7,7 @@ ROOT_DIR_SET=false
 ALL=false
 CHECK=false
 JSON=false
-CHECK_TIMEOUT=45
+CHECK_TIMEOUT=15
 
 if [[ -t 1 ]]; then
   COLOR_RED=$'\033[0;31m'
@@ -49,7 +49,7 @@ Options:
   -a, --all         Update all projects without prompting.
   --check          Check tags, then select projects to update (blank = none).
   --json           With --check, output JSON only; never update.
-  --timeout SEC    Registry query timeout in check mode (default: 45).
+  --timeout SEC    Registry query timeout in check mode (default: 15).
   -d, --dir DIR     Root directory to scan.
                     If omitted, discover running compose projects via Docker labels.
   -h, --help        Show this help message.
