@@ -381,12 +381,12 @@ check_projects() (
       file="$tmp/manifest-$counter"
       counter=$((counter + 1))
       # Docker CLI negotiates registry auth and fetches metadata only, not layers.
-      if timeout "${CHECK_TIMEOUT}s" docker manifest inspect --verbose "$ref" > "$file" 2> "$file.err"; then
+    if timeout --kill-after=2s "${CHECK_TIMEOUT}s" docker manifest inspect --verbose "$ref" > "$file" 2> "$file.err"; then
         cached[$ref]=$file
       else
         rc=$?
         cached[$ref]="$file.failed"
-        if [[ $rc == 124 ]]; then
+      if [[ $rc == 124 || $rc == 137 ]]; then
           printf 'Timed out after %ss\n' "$CHECK_TIMEOUT" > "$file.err"
         elif [[ ! -s $file.err ]]; then
           printf 'docker manifest inspect exited with code %s\n' "$rc" > "$file.err"
