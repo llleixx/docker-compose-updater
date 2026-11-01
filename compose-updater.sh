@@ -377,6 +377,16 @@ check_projects() (
     os=$(jq -r '.[0].Os' "$tmp/image")
     arch=$(jq -r '.[0].Architecture' "$tmp/image")
     variant=$(jq -r '.[0].Variant // ""' "$tmp/image")
+    # The containerd image store uses manifest/index IDs, not config IDs.
+    # Prefer the manifest actually used to create the running container.
+    local_manifest=$(jq -r '.[0].ImageManifestDescriptor.digest // empty' "$tmp/container")
+    comparison=config
+    if [[ -n $local_manifest ]]; then
+      current=$local_manifest
+      comparison=manifest
+    elif jq -e '.[0].Descriptor.digest' "$tmp/image" >/dev/null; then
+      emit unknown 'Manifest-based image ID without a running platform manifest'; continue
+    fi
     if [[ ! ${cached[$ref]+yes} ]]; then
       file="$tmp/manifest-$counter"
       counter=$((counter + 1))
@@ -398,14 +408,13 @@ check_projects() (
     if [[ $file == *.failed ]]; then
       emit unknown "Registry query failed: $(head -c 400 "$file")"; continue
     fi
-    # Container Image is the image config digest, not the manifest/index digest.
-    # Select the running platform first; ignore attestations and other platforms.
-    if ! remote=$(jq -er --arg os "$os" --arg arch "$arch" --arg variant "$variant" '
+    # Compare like-for-like digests and ignore other platforms/attestations.
+    if ! remote=$(jq -er --arg os "$os" --arg arch "$arch" --arg variant "$variant" --arg comparison "$comparison" '
       (if type == "array" then .[] else . end)
       | select(.Descriptor.platform.os == $os and .Descriptor.platform.architecture == $arch)
       | select($variant == "" or (.Descriptor.platform.variant // "") == $variant)
-      | (.OCIManifest // .SchemaV2Manifest // (try (.Raw | @base64d | fromjson) catch null))
-      | .config.digest // empty' "$file" | sort -u); then
+      | if $comparison == "manifest" then .Descriptor.digest // empty
+        else (.OCIManifest // .SchemaV2Manifest // (try (.Raw | @base64d | fromjson) catch null)) | .config.digest // empty end' "$file" | sort -u); then
       emit unknown 'No matching platform/config digest in registry response'; continue
     fi
     if [[ $remote == *$'\n'* ]]; then

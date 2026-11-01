@@ -58,8 +58,12 @@ Requirements: `docker`, `docker compose`.
 Check mode additionally requires `jq` and GNU `timeout` (on Debian/Ubuntu:
 `apt-get install jq coreutils`). It fetches registry metadata through
 `docker manifest inspect --verbose`, using Docker's configured registry credentials.
-It compares the running container's image config digest with the remote image for
-the same OS/architecture/variant, without downloading image layers.
+It compares the running container with the remote image for the same
+OS/architecture/variant, without downloading image layers. With the classic image
+store it compares config digests; with the containerd store it compares the running
+container's platform manifest digest. Manifest/index IDs are never compared with
+config digests. If the running platform manifest is unavailable for a manifest-based
+image ID, the result is `unknown`.
 Each query has a 15-second default timeout; a CLI process that ignores termination
 is forcibly killed after a further 2 seconds. `--timeout` overrides the query limit.
 
